@@ -115,8 +115,17 @@ function selectProvider(key: string) {
   checkResult.value = null
 }
 
+// 本地模型供应商（Ollama / LM Studio）不需要 API Key
+const isLocalProvider = computed(() => {
+  return ['ollama', 'lmstudio'].includes(selectedProviderKey.value)
+})
+
 const canFetchModels = computed(() => !!baseUrl.value.trim() && !!currentConfig.value)
-const canValidate = computed(() => !!baseUrl.value.trim() && !!apiKey.value.trim() && !!currentConfig.value)
+const canValidate = computed(() => {
+  if (!baseUrl.value.trim() || !currentConfig.value) return false
+  if (isLocalProvider.value) return true // 本地模型不需要 API Key
+  return !!apiKey.value.trim()
+})
 
 async function handleFetchModels() {
   if (isFetchingModels.value) return
@@ -180,12 +189,13 @@ async function handleValidate() {
 }
 
 const canSave = computed(() => {
-  return !!serviceName.value.trim()
+  const base = !!serviceName.value.trim()
     && !!selectedProviderKey.value
     && !!baseUrl.value.trim()
-    && !!apiKey.value.trim()
     && selectedModelIds.value.length > 0
     && !!currentConfig.value
+  if (isLocalProvider.value) return base // 本地模型不需要 API Key
+  return base && !!apiKey.value.trim()
 })
 
 function handleSave() {

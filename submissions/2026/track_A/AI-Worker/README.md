@@ -7,6 +7,20 @@
 
 ---
 
+## 产品预览
+
+> 视频演示
+ 
+点击查看视频演示<a href="images/demo.mp4" target="_blank">查看视频</a>
+
+| | | |
+| :---: | :---: | :---: |
+| ![产品预览1](images/cowork_1.jpg) | ![产品预览2](images/cowork_2.jpg) | ![产品预览3](images/cowork_3.jpg) |
+| ![产品预览4](images/cowork_4.jpg) | ![产品预览5](images/cowork_5.jpg) | ![产品预览6](images/cowork_6.jpg) |
+| ![产品预览7](images/cowork_7.jpg) | | |
+
+---
+
 ## 核心代码
 
 > **Gemma 4 原生函数调用（Native Function Calling）实现**
@@ -85,7 +99,7 @@ export interface ToolCall {
 | 维度 | 选型理由 |
 | ---- | -------- |
 | **内网部署** | Gemma 4 支持通过 Ollama、LM Studio 等本地推理框架在内网环境中部署运行，无需连接外部 API 服务。所有推理计算均在本地完成，数据不出内网，满足企业对数据安全的合规要求 |
-| **消费级 GPU 可运行** | Gemma 4 提供多种参数规模，在消费级 GPU（单卡 RTX 4090 24GB）上即可流畅运行，无需昂贵的服务器级硬件。这降低了企业部署门槛，使 AI 能力可以下沉到个人工作站 |
+| **消费级 GPU 可运行** | Gemma 4 提供多种参数规模，在消费级GPU上即可流畅运行，无需昂贵的服务器级硬件。这降低了企业部署门槛，使 AI 能力可以下沉到个人工作站 |
 | **企业私有化部署，不出域** | Gemma 4 作为开源模型，支持完全私有化部署。企业可在内部服务器或个人工作站上独立运行，模型权重、推理过程、用户数据全程不离开企业内网，杜绝数据外泄风险 |
 
 ## 部署环境要求
@@ -755,6 +769,14 @@ A：清除 localStorage 里的 `aipcowork_auth`，或在浏览器 / Tauri DevToo
 localStorage.removeItem('aipcowork_auth')
 location.reload()
 ```
+
+**Q：Ollama 集成 Gemma 4 时没有输出或没有思考过程？**
+A：确保使用 Ollama ≥ 0.3.x 版本。本项目已修复 Gemma 4 模型的兼容性问题：
+- Ollama Gemma 4 使用 `delta.reasoning` 字段（非 `delta.reasoning_content`），已兼容处理
+- 部分 Ollama 版本即使设置 `stream: true` 也返回非流式格式，已增加 `message` 字段回退解析
+- Plan Agent 在流式调用无输出时自动回退到非流式调用
+- Ollama 本地模型（`http://127.0.0.1:11434`）不需要填写 API Key
+- 模型列表支持从 Ollama 原生 `/api/tags` 端点获取
 
 ## License
 

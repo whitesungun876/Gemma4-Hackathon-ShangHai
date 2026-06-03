@@ -11,6 +11,7 @@
  */
 
 import {
+  chatRaw,
   streamChat,
   type ChatMessage,
   type LLMRequestParams,
@@ -26,9 +27,13 @@ export interface PlanStreamCallbacks {
   onToken?: (token: string) => void
 }
 
-/** 辅助函数：使用流式调用并等待完成，同时转发生成的 token */
-function streamAndWait(params: LLMRequestParams, callbacks?: PlanStreamCallbacks): Promise<string> {
-  return new Promise((resolve, reject) => {
+/**
+ * 辅助函数：使用流式调用并等待完成，同时转发生成的 token。
+ * 如果流式调用返回空文本（部分 Ollama 版本不兼容 stream=true），
+ * 自动回退到非流式 chatRaw 调用。
+ */
+async function streamAndWait(params: LLMRequestParams, callbacks?: PlanStreamCallbacks): Promise<string> {
+  const streamedText = await new Promise<string>((resolve, reject) => {
     let accumulated = ''
     streamChat(params, {
       onToken(token: string) {
@@ -46,6 +51,30 @@ function streamAndWait(params: LLMRequestParams, callbacks?: PlanStreamCallbacks
       },
     })
   })
+
+  // 流式调用返回空文本时，回退到非流式调用（部分 Ollama 版本即使 stream=true 也返回非流式格式，
+  // 导致 SSE 解析器无法提取内容）
+  if (!streamedText.trim()) {
+    console.warn('[PlanAgent] 流式调用返回空文本，回退到非流式调用')
+    try {
+      const response = await chatRaw(params)
+      const fallbackText = response.text || ''
+      if (fallbackText.trim()) {
+        // 将非流式结果通过 token 回调推送给 UI，确保用户能看到输出
+        callbacks?.onToken?.(fallbackText)
+      }
+      // 回传 reasoning 内容（Ollama Gemma 4 的 reasoning 字段）
+      if (response.reasoningContent) {
+        callbacks?.onThinking?.(response.reasoningContent)
+      }
+      return fallbackText
+    } catch (err) {
+      console.error('[PlanAgent] 非流式回退也失败:', err)
+      return streamedText // 返回原始空文本，让上层处理
+    }
+  }
+
+  return streamedText
 }
 
 // ─── 工具函数 ──────────────────────────────────────────────────

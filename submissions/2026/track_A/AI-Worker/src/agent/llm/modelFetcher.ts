@@ -30,6 +30,12 @@ const KNOWN_CONTEXT_WINDOWS: Record<string, number> = {
   'glm-4-long': 1000000,
 }
 
+/** 判断是否为 Ollama 本地服务地址 */
+function isOllamaBaseUrl(baseUrl: string): boolean {
+  const normalized = baseUrl.trim().replace(/\/+$/, '')
+  return normalized.endsWith(':11434') || normalized.includes('localhost:11434') || normalized.includes('127.0.0.1:11434')
+}
+
 export async function fetchProviderModels(
   baseUrl: string,
   apiKey: string,
@@ -43,8 +49,31 @@ export async function fetchProviderModels(
     return { success: false, models: [], error: 'Anthropic API 不支持获取模型列表' }
   }
 
+  const normalizedBase = baseUrl.trim().replace(/\/+$/, '')
+
+  // 优先尝试 OpenAI 兼容的 /v1/models 端点
+  const openAIResult = await fetchOpenAIModels(normalizedBase, apiKey)
+  if (openAIResult.success && openAIResult.models.length > 0) {
+    return openAIResult
+  }
+
+  // 若 OpenAI 端点失败且看起来是 Ollama 地址，尝试 Ollama 原生 /api/tags 端点
+  if (isOllamaBaseUrl(normalizedBase)) {
+    const ollamaResult = await fetchOllamaModels(normalizedBase)
+    if (ollamaResult.success) return ollamaResult
+  }
+
+  // 返回 OpenAI 端点的结果（即使是错误信息，也比 Ollama 回退更准确）
+  return openAIResult
+}
+
+/** 通过 OpenAI 兼容端点获取模型列表 */
+async function fetchOpenAIModels(baseUrl: string, apiKey: string): Promise<FetchModelsResult> {
   try {
-    const apiUrl = baseUrl.trim().replace(/\/+$/, '') + '/models'
+    // 确保 URL 包含 /v1 前缀
+    const apiUrl = baseUrl.endsWith('/v1')
+      ? baseUrl + '/models'
+      : baseUrl + '/v1/models'
     const headers: Record<string, string> = {}
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`
@@ -69,7 +98,6 @@ export async function fetchProviderModels(
       .map((m: any) => {
         const id = m.id
         const info: ModelInfo = { id, label: id }
-        // 优先使用 API 返回的 context_window，否则查已知映射表
         if (typeof m.context_window === 'number' && m.context_window > 0) {
           info.contextWindow = m.context_window
         } else if (KNOWN_CONTEXT_WINDOWS[id]) {
@@ -81,5 +109,33 @@ export async function fetchProviderModels(
     return { success: true, models }
   } catch (e: any) {
     return { success: false, models: [], error: e.message || '获取失败' }
+  }
+}
+
+/** 通过 Ollama 原生 /api/tags 端点获取模型列表 */
+async function fetchOllamaModels(baseUrl: string): Promise<FetchModelsResult> {
+  try {
+    const apiUrl = baseUrl + '/api/tags'
+    const res = await fetch(apiUrl)
+    if (!res.ok) {
+      return { success: false, models: [], error: `Ollama HTTP ${res.status}` }
+    }
+
+    const data = await res.json()
+    // Ollama /api/tags 返回 { models: [{ name: "llama3:latest", ... }] }
+    const models: ModelInfo[] = (data.models || [])
+      .map((m: any) => {
+        const id = m.model || m.name || ''
+        const info: ModelInfo = { id, label: id }
+        if (KNOWN_CONTEXT_WINDOWS[id]) {
+          info.contextWindow = KNOWN_CONTEXT_WINDOWS[id]
+        }
+        return info
+      })
+      .filter((m: ModelInfo) => !!m.id)
+
+    return { success: true, models }
+  } catch (e: any) {
+    return { success: false, models: [], error: e.message || 'Ollama 获取失败' }
   }
 }

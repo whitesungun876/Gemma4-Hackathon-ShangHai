@@ -205,7 +205,9 @@ export class LLMService {
 
           try {
             const json = JSON.parse(data)
-            const delta = json.choices?.[0]?.delta
+            const choice = json.choices?.[0]
+            // 流式响应用 delta，非流式响应（部分 Ollama 版本即使 stream=true 也返回非流式格式）用 message
+            const delta = choice?.delta || choice?.message
 
             if (delta?.content) {
               fullText += delta.content
@@ -224,12 +226,48 @@ export class LLMService {
               }
             }
 
-            // DeepSeek reasoning_content
-            if (delta?.reasoning_content) {
-              callbacks.onThinking?.(delta.reasoning_content)
+            // 思考字段兼容：DeepSeek → reasoning_content, Ollama Gemma 4 → reasoning
+            const thinkingToken = delta?.reasoning_content || delta?.reasoning
+            if (thinkingToken) {
+              callbacks.onThinking?.(thinkingToken)
             }
           } catch {
             // 忽略解析错误
+          }
+        }
+      }
+
+      // 处理流结束后缓冲区中的剩余数据（部分供应商不发送 [DONE] 且最后一条 data 行无换行符）
+      if (buffer.trim()) {
+        const remainingLine = buffer.trim()
+        if (remainingLine.startsWith('data: ')) {
+          const data = remainingLine.slice(6).trim()
+          if (data !== '[DONE]') {
+            try {
+              const json = JSON.parse(data)
+              const choice = json.choices?.[0]
+              const delta = choice?.delta || choice?.message
+              if (delta?.content) {
+                fullText += delta.content
+                callbacks.onToken(delta.content)
+              }
+              if (delta?.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  if (tc.function) {
+                    callbacks.onToolCall?.({
+                      name: tc.function.name || '',
+                      arguments: tc.function.arguments || ''
+                    })
+                  }
+                }
+              }
+              const thinkingToken = delta?.reasoning_content || delta?.reasoning
+              if (thinkingToken) {
+                callbacks.onThinking?.(thinkingToken)
+              }
+            } catch {
+              // 忽略解析错误
+            }
           }
         }
       }
