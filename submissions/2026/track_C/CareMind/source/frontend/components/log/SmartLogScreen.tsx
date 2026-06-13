@@ -10,12 +10,16 @@ import {
   ClipboardList,
   Mic,
   Play,
+  ShieldCheck,
   Volume2,
   X
 } from "lucide-react-native";
 import { useCareMind } from "../../lib/caremind-store";
 import { runCareWorkflow, transcribeAudioNote } from "../../lib/care-workflow-api";
 import { isPrivacyMode } from "../../lib/inference/privacy-mode";
+import { TRACK_C_OFFLINE_DEMO } from "../../lib/inference/track-c-demo";
+import type { InferenceProvenance } from "../../lib/inference/shared/provenance";
+import { sourceLabel } from "../../lib/inference/shared/provenance";
 import { selectionHaptic, successHaptic } from "../../lib/safe-haptics";
 import {
   ANDROID_SPEECH_RECOGNITION_AVAILABLE,
@@ -43,6 +47,7 @@ type ScriptAdvice = {
   notRecommended: string;
   recommended: string;
   principle: string;
+  recordSuggestion?: string;
 };
 
 type BrowserSpeechRecognitionResult = {
@@ -168,7 +173,7 @@ function formatEventDateTime(iso: string) {
 function MedicalBoundaryBubble({ onClose }: { onClose: () => void }) {
   return (
     <View style={styles.boundaryBubble}>
-      <Text style={styles.boundaryBubbleText}>我不能判断诊断或用药，但可以帮你整理成复诊时医生容易理解的问题。</Text>
+      <Text style={styles.boundaryBubbleText}>请不要自行停药或调整剂量。CareMind 只把它整理成复诊问题，不给用药建议。</Text>
       <Pressable accessibilityRole="button" accessibilityLabel="关闭医疗边界提示" hitSlop={hitSlop} onPress={onClose} style={styles.bubbleClose}>
         <X color={colors.status.info} size={18} />
       </Pressable>
@@ -534,7 +539,7 @@ function MagicLogInput({
     setVoiceHint("正在请求麦克风权限……");
 
     try {
-      if (await isPrivacyMode()) {
+      if ((await isPrivacyMode()) && !TRACK_C_OFFLINE_DEMO) {
         setVoiceState("unsupported");
         setVoiceHint("隐私模式下暂不启用语音转文字。你可以先手动输入，或关闭隐私模式后使用系统语音识别。");
         onTrackVoiceEvent("voice_input_unsupported", {
@@ -562,7 +567,11 @@ function MagicLogInput({
       }
 
       await startAndroidSpeechRecognition("zh-CN");
-      setVoiceHint("正在听，松手后我会转成文字。");
+      setVoiceHint(
+        TRACK_C_OFFLINE_DEMO
+          ? "正在听，松手后会用手机系统语音识别转成文字；之后请点“帮我整理”进入本地 Gemma。"
+          : "正在听，松手后我会转成文字。"
+      );
       onTrackVoiceEvent("voice_input_started", {
         platform: Platform.OS,
         provider: "android_speech_recognizer"
@@ -616,7 +625,7 @@ function MagicLogInput({
     recordingRef.current = null;
     nativeStopRequestedRef.current = false;
     setVoiceState("transcribing");
-    setVoiceHint("正在上传并转成文字……");
+    setVoiceHint("正在转成文字……");
 
     try {
       await recording.stopAndUnloadAsync();
@@ -659,6 +668,15 @@ function MagicLogInput({
 
   function startVoiceInput() {
     if (parseState === "parsing") return;
+    if (TRACK_C_OFFLINE_DEMO && Platform.OS !== "android") {
+      setVoiceState("unsupported");
+      setVoiceHint("Track C 离线 demo 目前只在 Android 使用系统语音转文字；其他平台请先手动输入。");
+      onTrackVoiceEvent("voice_input_unsupported", {
+        platform: Platform.OS,
+        reason: "track_c_audio_requires_android_system_speech"
+      });
+      return;
+    }
     if (Platform.OS === "web") {
       startWebSpeechInput();
       return;
@@ -918,6 +936,9 @@ function AttentionPreviewCard() {
 }
 
 function InstantScriptCard({ advice }: { advice: ScriptAdvice }) {
+  const recordSuggestion =
+    advice.recordSuggestion ?? "记录触发场景、回应后情绪是否缓和，以及下次是否值得继续尝试。";
+
   function speak() {
     Speech.stop();
     Speech.speak(advice.recommended, { language: "zh-CN", pitch: 1.0, rate: 0.85 });
@@ -927,7 +948,7 @@ function InstantScriptCard({ advice }: { advice: ScriptAdvice }) {
     <Card>
       <View style={styles.headerRow}>
         <Volume2 color={colors.status.info} size={20} />
-        <Text style={styles.cardTitle}>现在可以这样回应</Text>
+        <Text style={styles.cardTitle}>沟通话术</Text>
       </View>
       <View style={styles.badScript}>
         <Text style={styles.badScriptLabel}>不建议说</Text>
@@ -941,6 +962,10 @@ function InstantScriptCard({ advice }: { advice: ScriptAdvice }) {
         </View>
       </View>
       <Text style={styles.body}>原则：{advice.principle}</Text>
+      <View style={styles.recordSuggestion}>
+        <ClipboardList color={colors.status.info} size={16} />
+        <Text style={styles.recordSuggestionText}>记录建议：{recordSuggestion}</Text>
+      </View>
     </Card>
   );
 }
@@ -953,6 +978,43 @@ function MilestoneToast({ text }: { text: string }) {
         <Text style={styles.toastText}>{text}</Text>
       </View>
     </View>
+  );
+}
+
+function provenanceTone(source: InferenceProvenance["source"]): "brand" | "watch" | "info" {
+  if (source === "native_litertlm_success") return "brand";
+  if (source === "native_litertlm_parse_fallback") return "watch";
+  return "info";
+}
+
+function InferenceProvenanceCard({ provenance }: { provenance: InferenceProvenance }) {
+  const detail = [
+    `source=${provenance.source}`,
+    `model=${provenance.modelId}`,
+    `backend=${provenance.backend}`,
+    `latency=${Math.max(0, Math.round(provenance.latencyMs))}ms`,
+    `native=${provenance.nativeGenerateAttempted ? "attempted" : "not_attempted"}`,
+    `returned=${provenance.nativeGenerateReturned ? "yes" : "no"}`,
+    `parse=${provenance.parseSucceeded ? "ok" : "fallback"}`,
+    provenance.rawOutputHash ? `hash=${provenance.rawOutputHash}` : null
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <Card tone={provenanceTone(provenance.source)}>
+      <View style={styles.headerRow}>
+        <ShieldCheck color={colors.brand.primaryDark} size={20} />
+        <Text style={styles.cardTitle}>{sourceLabel(provenance.source)}</Text>
+      </View>
+      {provenance.source === "unavailable" || provenance.source === "rule_local_fallback" ? (
+        <Text style={styles.provenanceMeta}>
+          本地模型未就绪或没有返回 native 输出。当前内容只是本地规则/手动草稿兜底，不代表 Gemma 4 / LiteRT-LM 真实推理；请先下载或导入模型，并运行离线验证。
+        </Text>
+      ) : null}
+      <Text style={styles.provenanceMeta}>{detail}</Text>
+      {provenance.fallbackReason ? (
+        <Text style={styles.provenanceMeta}>fallback_reason={provenance.fallbackReason}</Text>
+      ) : null}
+    </Card>
   );
 }
 
@@ -973,6 +1035,7 @@ export function SmartLogScreen() {
   const [workflowAttentionItems, setWorkflowAttentionItems] = useState<AttentionItem[]>([]);
   const [workflowMemoryItems, setWorkflowMemoryItems] = useState<MemoryItem[]>([]);
   const [workflowScriptAdvice, setWorkflowScriptAdvice] = useState<ScriptAdvice | null>(null);
+  const [inferenceProvenance, setInferenceProvenance] = useState<InferenceProvenance | null>(null);
   const [candidate, setCandidate] = useState<MemoryItem | null>(null);
   const [completedSteps, setCompletedSteps] = useState(0);
   const [inputError, setInputError] = useState<string | null>(null);
@@ -1017,23 +1080,40 @@ export function SmartLogScreen() {
       setWorkflowAttentionItems(result.attentionItems);
       setWorkflowMemoryItems(result.memoryItems);
       setWorkflowScriptAdvice(result.scriptAdvice);
+      setInferenceProvenance(result.inferenceProvenance ?? null);
       setCandidate(result.memoryItems[0] ?? previewMemoryCandidate(value));
       trackEvent("care_log_ai_parse_succeeded", {
         platform: Platform.OS,
         attention_count: result.attentionItems.length,
-        memory_candidate_count: result.memoryItems.length
+        memory_candidate_count: result.memoryItems.length,
+        inference_source: result.inferenceProvenance?.source ?? "unknown"
       });
     } catch (error) {
       console.warn("CareMind workflow parse failed, using local preview", error);
       const fallbackMemory = previewMemoryCandidate(value);
+      const reason = error instanceof Error ? error.message : "unknown";
       setParsedLog(previewStructuredLog(value));
       setWorkflowAttentionItems([]);
       setWorkflowMemoryItems(fallbackMemory ? [fallbackMemory] : []);
       setWorkflowScriptAdvice(null);
+      setInferenceProvenance({
+        source: "manual_draft",
+        task: "daily_log",
+        modelId: "none",
+        backend: "none",
+        latencyMs: 0,
+        engineInitialized: false,
+        nativeGenerateAttempted: false,
+        nativeGenerateReturned: false,
+        rawOutputLength: 0,
+        rawOutputHash: null,
+        parseSucceeded: false,
+        fallbackReason: reason
+      });
       setCandidate(fallbackMemory);
       trackEvent("care_log_ai_parse_failed", {
         platform: Platform.OS,
-        reason: error instanceof Error ? error.message : "unknown"
+        reason
       });
     }
     setParseState("parsed");
@@ -1057,6 +1137,7 @@ export function SmartLogScreen() {
     setWorkflowAttentionItems([]);
     setWorkflowMemoryItems([]);
     setWorkflowScriptAdvice(null);
+    setInferenceProvenance(null);
     setCandidate(null);
     setCompletedSteps(0);
     setInputError(null);
@@ -1093,12 +1174,13 @@ export function SmartLogScreen() {
         <>
           {memoryItems.length > 0 ? <MemoryUsedPill label="已参考已记住的信息" /> : null}
           <View style={styles.spacer} />
+          {inferenceProvenance ? <InferenceProvenanceCard provenance={inferenceProvenance} /> : null}
           <StructuredSummaryCard structuredLog={parsedLog} onChange={setParsedLog} />
+          {scriptAdvice ? <InstantScriptCard advice={scriptAdvice} /> : null}
           {parseState === "saved" ? <AttentionPreviewCard /> : null}
           {similarMemory ? (
             <SimilarEventCard date="已记住的信息" title={similarMemory.title} description={similarMemory.description} />
           ) : null}
-          {scriptAdvice ? <InstantScriptCard advice={scriptAdvice} /> : null}
           {candidate ? <MemoryCandidateCard item={candidate} /> : null}
           <View style={styles.saveActions}>
             <Button label={parseState === "saved" ? "再记一条" : "写入日志"} onPress={parseState === "saved" ? resetInput : save} />
@@ -1116,7 +1198,8 @@ function buildScriptAdvice(note: string, structuredLog: StructuredLog): ScriptAd
     return {
       notRecommended: "没人偷，你别乱想。",
       recommended: "你是不是很担心？我陪你一起找找。",
-      principle: "先回应担心，再陪伴确认，避免直接否定和争辩。"
+      principle: "先回应担心，再陪伴确认，避免直接否定和争辩。",
+      recordSuggestion: "记录丢失物品、出现时间、找回位置，以及这句话是否让情绪缓和。"
     };
   }
 
@@ -1124,7 +1207,8 @@ function buildScriptAdvice(note: string, structuredLog: StructuredLog): ScriptAd
     return {
       notRecommended: "这里就是家，你别再说了。",
       recommended: "你是不是有点想家？我们先坐一下，我陪你慢慢说。",
-      principle: "先接住情绪，再用安全的陪伴动作转移注意力。"
+      principle: "先接住情绪，再用安全的陪伴动作转移注意力。",
+      recordSuggestion: "记录通常在什么时间想回家、当时环境，以及陪坐或老照片是否有效。"
     };
   }
 
@@ -1132,7 +1216,8 @@ function buildScriptAdvice(note: string, structuredLog: StructuredLog): ScriptAd
     return {
       notRecommended: "你必须现在吃，不吃不行。",
       recommended: "我知道你现在不想吃，我们先歇一下，等你舒服点再看看。",
-      principle: "降低对抗，记录拒药场景，不自行补药或调整剂量。"
+      principle: "降低对抗，记录拒药场景，不自行补药或调整剂量。",
+      recordSuggestion: "记录拒药发生时间、是否补服过、是否呛咳或不适；不要自行调整剂量。"
     };
   }
 
@@ -1140,11 +1225,17 @@ function buildScriptAdvice(note: string, structuredLog: StructuredLog): ScriptAd
     return {
       notRecommended: "你怎么又不吃饭？",
       recommended: "我们先吃两口软一点的，吃不下也没关系，我陪着你。",
-      principle: "减少压力，记录摄入量；如果持续少食或呛咳，应咨询医生或营养师。"
+      principle: "减少压力，记录摄入量；如果持续少食或呛咳，应咨询医生或营养师。",
+      recordSuggestion: "记录大概吃了多少、喝了多少、有没有呛咳，以及哪种食物更容易接受。"
     };
   }
 
-  return null;
+  return {
+    notRecommended: "别想太多，没事的。",
+    recommended: "我在这儿，我们慢慢来。你哪里不舒服，告诉我就好。",
+    principle: "用短句、慢语速和陪伴感降低压力；不急着纠正或催促。",
+    recordSuggestion: "记录今天沟通是否顺利、对方情绪有没有变化，以及下次可以继续尝试的方法。"
+  };
 }
 
 const styles = StyleSheet.create({
@@ -1393,6 +1484,11 @@ const styles = StyleSheet.create({
     color: colors.text.muted,
     marginTop: 10
   },
+  provenanceMeta: {
+    ...typography.small,
+    color: colors.text.secondary,
+    marginTop: 8
+  },
   badScript: {
     borderRadius: 14,
     padding: 12,
@@ -1422,6 +1518,20 @@ const styles = StyleSheet.create({
     ...typography.body,
     color: colors.text.primary,
     marginTop: 5
+  },
+  recordSuggestion: {
+    marginTop: 12,
+    borderRadius: 14,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    backgroundColor: colors.statusSoft.info
+  },
+  recordSuggestionText: {
+    ...typography.helper,
+    color: colors.text.secondary,
+    flex: 1
   },
   speechButton: {
     marginTop: 12
